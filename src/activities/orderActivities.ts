@@ -13,7 +13,6 @@ export async function validateOrder(orderId: number): Promise<void> {
 export async function chargePayment(orderId: number): Promise<boolean> {
     console.log(`Processing payment for order ${orderId}...`)
 
-    // Simulate payment processing
     const success = Math.random() > 0.3
 
     if (!success) {
@@ -26,7 +25,14 @@ export async function chargePayment(orderId: number): Promise<boolean> {
 }
 
 export async function shipOrder(orderId: number): Promise<void> {
-    // Update order status to 'shipped'
     await query('UPDATE orders SET status = "shipped" WHERE id = ?', [orderId])
     console.log(`Order ${orderId} has been shipped.`)
+}
+
+export async function updateOrderStatus(
+    orderId: number,
+    status: string
+): Promise<void> {
+    await query('UPDATE orders SET status = ? WHERE id = ?', [status, orderId])
+    console.log(`Database updated: Order ${orderId} status set to ${status}.`)
 }

@@ -5,8 +5,7 @@ async function run() {
     const connection = await Connection.connect()
     const client = new Client({ connection })
 
-    const orderId = 1
-    // const orderId = 2
+    const orderId = 14
 
     const handle = await client.workflow.start(orderWorkflow, {
         args: [orderId],

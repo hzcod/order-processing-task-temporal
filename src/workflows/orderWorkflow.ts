@@ -1,24 +1,84 @@
-import { proxyActivities } from '@temporalio/workflow'
+import {
+    proxyActivities,
+    defineUpdate,
+    defineQuery,
+    setHandler,
+    sleep,
+    CancelledFailure,
+} from '@temporalio/workflow'
 import type * as activities from '../activities/orderActivities'
 
-const { validateOrder, chargePayment, shipOrder } = proxyActivities<
-    typeof activities
->({
-    startToCloseTimeout: '10s',
-    retry: {
-        maximumAttempts: 3,
-        initialInterval: '5s',
-    },
-})
+export type OrderStatus = 'pending' | 'paid' | 'shipped' | 'canceled'
+
+export const cancelUpdate = defineUpdate<OrderStatus, [OrderStatus]>(
+    'cancelUpdate'
+)
+export const getStatusQuery = defineQuery<OrderStatus>('getStatus')
+
+const { validateOrder, chargePayment, shipOrder, updateOrderStatus } =
+    proxyActivities<typeof activities>({
+        startToCloseTimeout: '10s',
+        retry: {
+            maximumAttempts: 3,
+            initialInterval: '5s',
+        },
+    })
 
 export async function orderWorkflow(orderId: number): Promise<void> {
-    await validateOrder(orderId)
+    let state: { currentStatus: OrderStatus } = { currentStatus: 'pending' }
+    let cancelRequested = false
 
-    const paymentSuccess = await chargePayment(orderId)
+    setHandler(cancelUpdate, (newStatus) => {
+        if (newStatus === 'canceled') {
+            cancelRequested = true
+            state.currentStatus = newStatus
+        }
+        return state.currentStatus
+    })
 
-    if (paymentSuccess) {
-        await shipOrder(orderId)
-    } else {
-        console.log(`Order ${orderId} payment failed, order will be canceled.`)
-    }
+    setHandler(getStatusQuery, () => state.currentStatus)
+
+    const expirationTimer = sleep(10 * 60 * 1000).then(() => {
+        throw new Error('Order expired')
+    })
+
+    const processPromise = (async () => {
+        await validateOrder(orderId)
+        console.log(`[order-${orderId}] Order validated.`)
+
+        console.log(`[order-${orderId}] Waiting 10s before charging payment...`)
+        await sleep(10 * 1000)
+
+        if (cancelRequested) {
+            console.log(`[order-${orderId}] Order was canceled before payment.`)
+            await updateOrderStatus(orderId, 'canceled')
+            throw new CancelledFailure('Order was canceled before payment')
+        }
+
+        const paymentSuccess = await chargePayment(orderId)
+        console.log(`[order-${orderId}] Payment success: ${paymentSuccess}`)
+
+        console.log(`[order-${orderId}] Waiting 10s before shipping...`)
+        await sleep(10 * 1000)
+
+        if (cancelRequested) {
+            console.log(
+                `[order-${orderId}] Order was canceled before shipping.`
+            )
+            await updateOrderStatus(orderId, 'canceled')
+            throw new CancelledFailure('Order was canceled before shipping')
+        }
+
+        if (paymentSuccess) {
+            state.currentStatus = 'paid'
+            await shipOrder(orderId)
+            state.currentStatus = 'shipped'
+            console.log(`[order-${orderId}] Order has been shipped.`)
+        } else {
+            state.currentStatus = 'canceled'
+            console.log(`[order-${orderId}] Payment failed; order canceled.`)
+        }
+    })()
+
+    await Promise.race([processPromise, expirationTimer])
 }
