@@ -7,6 +7,7 @@ import {
     CancelledFailure,
 } from '@temporalio/workflow'
 import type * as activities from '../activities/orderActivities'
+import * as heavyActivities from '../activities/memoryIntensiveActivities'
 
 export type OrderStatus = 'pending' | 'paid' | 'shipped' | 'canceled'
 
@@ -15,14 +16,25 @@ export const cancelUpdate = defineUpdate<OrderStatus, [OrderStatus]>(
 )
 export const getStatusQuery = defineQuery<OrderStatus>('getStatus')
 
-const { validateOrder, chargePayment, shipOrder, updateOrderStatus } =
-    proxyActivities<typeof activities>({
-        startToCloseTimeout: '10s',
-        retry: {
-            maximumAttempts: 3,
-            initialInterval: '5s',
-        },
-    })
+const normalActivities = proxyActivities<typeof activities>({
+    startToCloseTimeout: '10s',
+    retry: {
+        maximumAttempts: 3,
+        initialInterval: '5s',
+    },
+})
+
+// separate proxy for heavy activities, and its task queue is different.
+// heavy activities are routed to workers on a different queue.
+
+const heavyActivitiesProxy = proxyActivities<typeof heavyActivities>({
+    taskQueue: 'order-memory-intensive',
+    startToCloseTimeout: '30s',
+    retry: {
+        maximumAttempts: 3,
+        initialInterval: '5s',
+    },
+})
 
 export async function orderWorkflow(orderId: number): Promise<void> {
     let state: { currentStatus: OrderStatus } = { currentStatus: 'pending' }
@@ -43,7 +55,7 @@ export async function orderWorkflow(orderId: number): Promise<void> {
     })
 
     const processPromise = (async () => {
-        await validateOrder(orderId)
+        await normalActivities.validateOrder(orderId)
         console.log(`[order-${orderId}] Order validated.`)
 
         console.log(`[order-${orderId}] Waiting 10s before charging payment...`)
@@ -51,11 +63,14 @@ export async function orderWorkflow(orderId: number): Promise<void> {
 
         if (cancelRequested) {
             console.log(`[order-${orderId}] Order was canceled before payment.`)
-            await updateOrderStatus(orderId, 'canceled')
+            await normalActivities.updateOrderStatus(orderId, 'canceled')
             throw new CancelledFailure('Order was canceled before payment')
         }
 
-        const paymentSuccess = await chargePayment(orderId)
+        // Calling the heavy version of chargePayment.
+        const paymentSuccess = await heavyActivitiesProxy.chargePaymentHeavy(
+            orderId
+        )
         console.log(`[order-${orderId}] Payment success: ${paymentSuccess}`)
 
         console.log(`[order-${orderId}] Waiting 10s before shipping...`)
@@ -65,13 +80,13 @@ export async function orderWorkflow(orderId: number): Promise<void> {
             console.log(
                 `[order-${orderId}] Order was canceled before shipping.`
             )
-            await updateOrderStatus(orderId, 'canceled')
+            await normalActivities.updateOrderStatus(orderId, 'canceled')
             throw new CancelledFailure('Order was canceled before shipping')
         }
 
         if (paymentSuccess) {
             state.currentStatus = 'paid'
-            await shipOrder(orderId)
+            await normalActivities.shipOrder(orderId)
             state.currentStatus = 'shipped'
             console.log(`[order-${orderId}] Order has been shipped.`)
         } else {
